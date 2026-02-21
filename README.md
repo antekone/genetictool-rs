@@ -40,7 +40,7 @@ Zrzut ekranu z KDE, ciemny motyw kolorystyczny:
 ## Uruchamianie
 
    ```sh
-   git clone https://github.com/<twoje_repo>/genetictool-rs.git
+   git clone https://github.com/antekone/genetictool-rs.git
    cd genetictool-rs
    cargo run --release
    ```
