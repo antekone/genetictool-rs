@@ -1,5 +1,8 @@
 /// Licencja: MIT
 
+mod options_window;
+use options_window::{OptionsParams, OptionsWindow};
+
 use eframe::egui;
 use egui::{vec2, Color32, FontId, Layout, Painter, Pos2, Rect, Sense, Stroke, Ui, Vec2, Widget};
 use rand::Rng;
@@ -563,6 +566,8 @@ struct GaState {
     auto_active: bool,
     /// Czy wątek auto-calculate już działa?
     auto_thread_running: bool,
+    /// Parametry GA edytowalne przez okno opcji.
+    params: OptionsParams,
 }
 
 struct MyApp {
@@ -573,16 +578,20 @@ struct MyApp {
     /// Zmierzona szerokość paska przycisków z poprzedniej klatki.
     /// Używana do obliczenia lewego marginesu centrującego.
     btn_bar_width: f32,
+    /// Stan okna opcji (widoczność + wartości robocze w trakcie edycji).
+    options_window: OptionsWindow,
 }
 
 impl Default for MyApp {
     fn default() -> Self {
-        let pop = Population::random(20, -10.0, 10.0, FunctionPlot::target);
+        let defaults = OptionsParams::default();
+        let pop = Population::random(defaults.pop_size, -10.0, 10.0, FunctionPlot::target);
         let ga_state = Arc::new(Mutex::new(GaState {
             population: pop,
             running: false,
             auto_active: false,
             auto_thread_running: false,
+            params: defaults.clone(),
         }));
 
         Self {
@@ -591,6 +600,7 @@ impl Default for MyApp {
             ctx: None,
             selected_idx: None,
             btn_bar_width: 0.0,
+            options_window: OptionsWindow::new(&defaults),
         }
     }
 }
@@ -658,14 +668,16 @@ impl eframe::App for MyApp {
 
         // Sprawdź skróty klawiszowe (niezależnie od fokusa przycisku).
         let hotkey_calc  = ctx.input_mut(|i| i.consume_key(egui::Modifiers::ALT, egui::Key::C));
-        let hotkey_reset = ctx.input_mut(|i| i.consume_key(egui::Modifiers::ALT, egui::Key::R));
+        // Alt+R jest obsługiwany przez okno opcji, gdy jest otwarte – nie konsumuj go tutaj.
+        let hotkey_reset = !self.options_window.open
+            && ctx.input_mut(|i| i.consume_key(egui::Modifiers::ALT, egui::Key::R));
         let hotkey_auto  = ctx.input_mut(|i| i.consume_key(egui::Modifiers::ALT, egui::Key::A));
 
         // Odczytaj flagę auto z mutexa (potrzebna do wyświetlenia stanu przycisku).
         let auto_active = self.ga_state.lock().unwrap().auto_active;
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            // ── Środek: wykres + przyciski ────────────────────────────────
+            // -- Środek: wykres + przyciski ----------------------------------
             // Zarezerwuj pasek na przyciski na dole, reszta idzie na wykres.
             let btn_height = 28.0;
             let spacing   = 6.0;
@@ -706,6 +718,7 @@ impl eframe::App for MyApp {
                     manual_enabled,
                     egui::Button::new("Następna generacja").shortcut_text("Alt+C"),
                 );
+
                 if btn_calc.clicked() || (manual_enabled && hotkey_calc) {
                     self.spawn_ga_step();
                 }
@@ -714,8 +727,10 @@ impl eframe::App for MyApp {
                     manual_enabled,
                     egui::Button::new("Reset").shortcut_text("Alt+R"),
                 );
+
                 if btn_reset.clicked() || (manual_enabled && hotkey_reset) {
-                    let pop = Population::random(20, -10.0, 10.0, FunctionPlot::target);
+                    let pop_size = self.ga_state.lock().unwrap().params.pop_size;
+                    let pop = Population::random(pop_size, -10.0, 10.0, FunctionPlot::target);
                     let mut state = self.ga_state.lock().unwrap();
                     state.population = pop;
                     self.selected_idx = None;
@@ -728,11 +743,13 @@ impl eframe::App for MyApp {
                 } else {
                     ui.visuals().widgets.inactive.fg_stroke.color
                 };
+
                 let btn_auto = ui.add(
                     egui::Button::new(
                         egui::RichText::new(auto_label).color(auto_color)
                     ).shortcut_text("Alt+A"),
                 );
+
                 if btn_auto.clicked() || hotkey_auto {
                     let mut state = self.ga_state.lock().unwrap();
                     state.auto_active = !state.auto_active;
@@ -748,6 +765,13 @@ impl eframe::App for MyApp {
                         // Wyłączamy auto, wątek sam wyzeruje flagę po zakończeniu
                     }
                 }
+
+                ui.add_space(18.0);
+                let btn_opcje = ui.add(egui::Button::new("Opcje").shortcut_text("Alt+O"));
+                if btn_opcje.clicked() || ctx.input(|i| i.key_pressed(egui::Key::O) && i.modifiers.alt) {
+                    let params = self.ga_state.lock().unwrap().params.clone();
+                    self.options_window.open_with(&params);
+                }
             });
 
             // Oblicz rzeczywistą szerokość samych przycisków (bez lewego marginesu).
@@ -758,6 +782,11 @@ impl eframe::App for MyApp {
                 self.btn_bar_width = measured;
             }
         });
+
+        // Okno opcji – delegujemy całą logikę do OptionsWindow::show()
+        if let Some(params) = self.options_window.show(ctx) {
+            self.ga_state.lock().unwrap().params = params;
+        }
     }
 }
 
@@ -813,17 +842,18 @@ impl MyApp {
     }
 
     fn calculate(state_arc: Arc<Mutex<GaState>>, ctx: &Option<egui::Context>) {
-        // Pobierz aktualną populację i numer pokolenia.
-        let (old_pop, new_gen) = {
+        // Pobierz aktualną populację, numer pokolenia i aktualne parametry GA.
+        let (old_pop, new_gen, pop_size, tournament_k, crossover_prob, mutation_prob) = {
             let state = state_arc.lock().unwrap();
-            (state.population.clone(), state.population.generation + 1)
+            (
+                state.population.clone(),
+                state.population.generation + 1,
+                state.params.pop_size,
+                state.params.tournament_k,
+                state.params.crossover_prob,
+                state.params.mutation_prob,
+            )
         };
-
-        // Parametry GA
-        const POP_SIZE:       usize = 20;
-        const TOURNAMENT_K:   usize = 3;    // rozmiar turnieju przy selekcji
-        const CROSSOVER_PROB: f64   = 0.8;  // prawdopodobieństwo krzyżowania
-        const MUTATION_PROB:  f64   = 0.05; // prawdopodobieństwo mutacji jednego bitu
 
         // Seed oparty na czasie, żeby każde pokolenie było naprawdę losowe.
         let seed = std::time::SystemTime::now()
@@ -843,7 +873,7 @@ impl MyApp {
         // ile potrzebujesz rodziców.
         let tournament = |rng: &mut rand::rngs::StdRng| -> &Chromosome {
             let mut best_idx = rng.gen_range(0..parents.len());
-            for _ in 1..TOURNAMENT_K {
+            for _ in 1..tournament_k {
                 let idx = rng.gen_range(0..parents.len());
                 if parents[idx].fitness > parents[best_idx].fitness {
                     best_idx = idx;
@@ -859,7 +889,7 @@ impl MyApp {
         //     dziecko:  1101|1100
         let crossover = |a: &Chromosome, b: &Chromosome, rng: &mut rand::rngs::StdRng| -> [bool; BITS] {
             let mut genes = a.genes;
-            if rng.gen_bool(CROSSOVER_PROB) {
+            if rng.gen_bool(crossover_prob) {
                 // punkt cięcia: 1..BITS-1
                 let point = rng.gen_range(1..BITS);
                 for i in point..BITS {
@@ -875,20 +905,20 @@ impl MyApp {
         // jeden bit w DNA.
         let mutate = |genes: &mut [bool; BITS], rng: &mut rand::rngs::StdRng| {
             for bit in genes.iter_mut() {
-                if rng.gen_bool(MUTATION_PROB) {
+                if rng.gen_bool(mutation_prob) {
                     *bit = !*bit;
                 }
             }
         };
 
         // -- Elityzm: najlepszy osobnik przechodzi bez zmian -----------------
-        let mut new_chromosomes: Vec<Chromosome> = Vec::with_capacity(POP_SIZE);
+        let mut new_chromosomes: Vec<Chromosome> = Vec::with_capacity(pop_size);
         if let Some(elite) = old_pop.best() {
             new_chromosomes.push(elite.clone());
         }
 
         // -- Wypełnij resztę populacji dziećmi -------------------------------
-        while new_chromosomes.len() < POP_SIZE {
+        while new_chromosomes.len() < pop_size {
             let parent_a = tournament(&mut rng);
             let parent_b = tournament(&mut rng);
 
